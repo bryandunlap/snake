@@ -7,10 +7,10 @@
 #include <curses.h>
 
 #define DEFAULT_SNAKE_NODES 4 
-#define GAME_LOOP_DELAY 100         // ms
+#define GAME_LOOP_DELAY 200         // ms
 
-#define MATRIX_X 16 
-#define MATRIX_Y 16
+#define MATRIX_X 32 
+#define MATRIX_Y 32
 
 #define STEP 1
 
@@ -99,12 +99,8 @@ int main(void)
 
 	if (has_colors())
 		start_color();
-
-	// prepare the game window
-	WINDOW * const window = newwin(MATRIX_Y, 
-		MATRIX_X * 2, 
-		(LINES - MATRIX_Y) / 2,
-		(COLS - MATRIX_X * 2) / 2);
+	else
+		panic("terminal does not support colors");
 
 	// define color pairs for game entities
 	init_pair(WALL_PAIR, COLOR_WHITE, COLOR_WHITE);
@@ -112,7 +108,11 @@ int main(void)
 	init_pair(FOOD_PAIR, COLOR_GREEN, COLOR_GREEN);
 	init_pair(COLLISION_PAIR, COLOR_RED, COLOR_RED);
 
-	srand(time(NULL));       // seed the prng
+	// prepare the game window
+	WINDOW * const window = newwin(MATRIX_Y, 
+		MATRIX_X * 2, 
+		(LINES - MATRIX_Y) / 2,
+		(COLS - MATRIX_X * 2) / 2);
 
 	// allocate game memory
 	game_state * const game_state = malloc(sizeof(*game_state));
@@ -155,6 +155,8 @@ int main(void)
 		matrix->cells[(node_index + x_offset) * MATRIX_Y + 10] = SNAKE;
 	}
    
+	srand(time(NULL));       // seed the prng
+
 	place_food(matrix);     // place the first food item on the game matrix 
 
 	// game loop
@@ -174,7 +176,7 @@ int main(void)
 			case KEY_RIGHT:
 				snake->direction = snake->direction == LEFT ? LEFT : RIGHT;
 				break;
-			default:        // unknown arrow key - noop
+			default:        // unknown keypress - noop
 				break;
 		}
 
@@ -217,9 +219,9 @@ int main(void)
 				*new_head_cell = SNAKE;
 				place_food(matrix);
 				break;
-			case WALL:      // snake collides with wall 
-			case SNAKE:     // snake collides with itself
+			case WALL:      // snake collides with itself
 				chop_tail(snake, matrix);
+			case SNAKE:     // snake collides with wall 
 				*new_head_cell = COLLISION;
 				game_state->collision = true;
 				break;
