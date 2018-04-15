@@ -7,157 +7,158 @@
 #include <curses.h>
 
 #define DEFAULT_SNAKE_NODES 4 
-#define GAME_LOOP_DELAY 50          // ms
-#define MATRIX_ROWS 32              // MATRIX_ROWS * MATRIX_COLS must be 2^n 
-#define MATRIX_COLS 32
+#define GAME_LOOP_DELAY 100         // ms
+
+#define MATRIX_X 16 
+#define MATRIX_Y 16
+
 #define STEP 1
 
-#define mask(index) index & (MATRIX_ROWS * MATRIX_COLS - 1)
-
-typedef struct snake_node
-{
-	int x, y;
-} snake_node;
+#define RING_MASK(index) index & (MATRIX_X * MATRIX_Y - 1)
+#define RAND_TO(max) rand() / (RAND_MAX / (max + 1) + 1)
 
 typedef enum direction
 {
 	UP, DOWN, LEFT, RIGHT
 } direction;
 
+typedef struct snake_node
+{
+	int x, y;
+} snake_node;
+
 typedef struct snake
 {
-	snake_node nodes[MATRIX_ROWS * MATRIX_COLS];
+	snake_node nodes[MATRIX_X * MATRIX_Y];
 	size_t head, tail;
 	direction direction;
 } snake;
 
 typedef enum cell
 {
-	EMPTY, SNAKE, FOOD, COLLISION
+	EMPTY, SNAKE, FOOD, WALL, COLLISION
 } cell;
 
 typedef struct matrix
 {
-	cell cells[MATRIX_ROWS * MATRIX_COLS];
+	cell cells[MATRIX_X * MATRIX_Y];
 } matrix;
 
-static void cleanup_window()
+typedef struct game_state
 {
-	clear();     // clear the window buffer
-	refresh();   // flush the window buffer to screen
-	endwin();    // clean up the window
+	matrix matrix;
+	snake snake;
+	bool collision;
+} game_state;
+
+static void cleanup(WINDOW *window)
+{
+	delwin(window);     // clean up the game window
+	endwin();           // exit curses mode
 }
 
-static void panic()
+static void panic(char *message)
 {
-	cleanup_window();
+	endwin();
+	puts(message);
 	exit(EXIT_FAILURE);
-}
-
-static long rand_to(long max)
-{
-	return rand() / (RAND_MAX / (max + 1) + 1);
 }
 
 static void chop_tail(snake *snake, matrix *matrix)
 {
-	snake_node const * const old_tail = &snake->nodes[mask(snake->tail)];
-	matrix->cells[old_tail->x * MATRIX_COLS + old_tail->y] = EMPTY;
+	snake_node const * const old_tail = &snake->nodes[RING_MASK(snake->tail)];
+	matrix->cells[old_tail->x * MATRIX_Y + old_tail->y] = EMPTY;
 	(snake->tail)++;
 }
 
 static void place_food(matrix *matrix)
 {
-	// TODO: this gets REALLY ugly as the SNAKE/EMPTY cell ratio increases,
-	//       randomize on a bucket of only EMPTY cells.
-	static int const max_rand = (MATRIX_ROWS * MATRIX_COLS) - 1;
-	cell * const food_cell = &matrix->cells[rand_to(max_rand)];
-	if (*food_cell != SNAKE && *food_cell != COLLISION)
+	// TODO: need to randomize on a bucket of only EMPTY cells.
+	static int const max_rand = (MATRIX_X * MATRIX_Y) - 1;
+	cell * const food_cell = &matrix->cells[RAND_TO(max_rand)];
+	if (*food_cell != SNAKE && *food_cell != WALL && *food_cell != COLLISION)
 		*food_cell = FOOD;
 	else
 		place_food(matrix);
 }
 
-// TODO: move to ui module
-static bool draw_matrix(matrix *matrix)
-{
-	// clear the window buffer
-	clear();
- 
- 	// print the game matrix to the window buffer
-	// TODO: only draw dirty regions?
-	bool running = true;
-	for (size_t x = 0; x < MATRIX_ROWS; ++x)
- 	{
-		for (size_t y = 0; y < MATRIX_COLS; ++y)
-		{
- 			switch (matrix->cells[x * MATRIX_COLS + y])
-			{
-				case SNAKE:
-					mvprintw(y, x, "O");
-					break;
-				case FOOD:
-					mvprintw(y, x, "+");
-					break;
-				case EMPTY:
-					mvprintw(y, x, " ");
-					break;
-				case COLLISION:
-					mvprintw(y, x, "X");
-					running = false;
-					break;
-				default:      // unknown matrix cell type
-					panic();
-			}
-		}
-	}
-    
-	// flush the window buffer to the screen
-	refresh();
-
-	return running;
-}
+#define WALL_PAIR 1
+#define SNAKE_PAIR 2
+#define FOOD_PAIR 3
+#define COLLISION_PAIR 4
 
 int main(void)
 {
 	// TODO: move to ui module
-	initscr();               // initialize the default window
+	initscr();               // initialize curses mode 
 	curs_set(false);         // hide the cursor
 	cbreak();                // read a character at a time
 	keypad(stdscr, true);    // listen for arrow keys
 	nodelay(stdscr, true);   // non blocking input
 	noecho();                // don't echo input
 
+	if (has_colors())
+		start_color();
+
+	// prepare the game window
+	WINDOW * const window = newwin(MATRIX_Y, 
+		MATRIX_X * 2, 
+		(LINES - MATRIX_Y) / 2,
+		(COLS - MATRIX_X * 2) / 2);
+
+	// define color pairs for game entities
+	init_pair(WALL_PAIR, COLOR_WHITE, COLOR_WHITE);
+	init_pair(SNAKE_PAIR, COLOR_YELLOW, COLOR_YELLOW);
+	init_pair(FOOD_PAIR, COLOR_GREEN, COLOR_GREEN);
+	init_pair(COLLISION_PAIR, COLOR_RED, COLOR_RED);
+
 	srand(time(NULL));       // seed the prng
 
-	// allocate and initialize memory for the game matrix
-	matrix * const matrix = malloc(sizeof(*matrix));
-	if (!matrix)
-		panic();
-	memset(matrix->cells, EMPTY, MATRIX_ROWS * MATRIX_COLS * sizeof(cell));
+	// allocate game memory
+	game_state * const game_state = malloc(sizeof(*game_state));
+	if (!game_state)
+		panic("game state malloc failed");
 
-	// allocate and initialize memory for the snake 
-	snake * const snake = malloc(sizeof(*snake));
-	if (!snake)
-		panic();
+	// initialize game state
+	game_state->collision = false;
+
+	// initialize memory for the matrix
+	matrix * const matrix = &game_state->matrix;
+	memset(matrix->cells, EMPTY, MATRIX_X * MATRIX_Y * sizeof(cell));
+
+	// initialize memory for the snake 
+	snake * const snake = &game_state->snake;
 	snake->head = DEFAULT_SNAKE_NODES - 1;
 	snake->tail = 0;
 	snake->direction = RIGHT;
-	memset(snake->nodes, 0, MATRIX_ROWS * MATRIX_COLS * sizeof(snake_node)); 
+	memset(snake->nodes, 0, MATRIX_X * MATRIX_Y * sizeof(snake_node)); 
 
+	// place the walls on the game matrix
+	for (size_t wall_x = 0; wall_x < MATRIX_X; ++wall_x)
+	{
+		for (size_t wall_y = 0; wall_y < MATRIX_Y; ++wall_y)
+		{
+			if ((wall_x == 0 || wall_x == MATRIX_X - 1)
+				|| (wall_y == 0 || wall_y == MATRIX_Y - 1))
+			{
+				matrix->cells[wall_x * MATRIX_Y + wall_y] = WALL;
+			}
+		}
+	}
+	
 	// queue the default snake nodes and set the direction
+	size_t const x_offset = 5;
 	for (size_t node_index = 0; node_index < DEFAULT_SNAKE_NODES; ++node_index)
 	{
-		snake->nodes[node_index].x = node_index;
+		snake->nodes[node_index].x = node_index + x_offset;
 		snake->nodes[node_index].y = 10;
-		matrix->cells[node_index * MATRIX_COLS + 10] = SNAKE;
+		matrix->cells[(node_index + x_offset) * MATRIX_Y + 10] = SNAKE;
 	}
    
-	place_food(matrix);     // place the initial food item on the game matrix 
+	place_food(matrix);     // place the first food item on the game matrix 
 
 	// game loop
-	bool running = true;
-	while (running)
+	while (!game_state->collision)
 	{
 		switch (getch())    // process arrow key input 
 		{
@@ -179,8 +180,8 @@ int main(void)
 
 		// add a new snake head based on the current direction 
 		size_t const new_head_index = snake->head + STEP;
-		snake_node * const new_head = &snake->nodes[mask(new_head_index)];
-		snake_node * const old_head = &snake->nodes[mask(snake->head)];
+		snake_node * const new_head = &snake->nodes[RING_MASK(new_head_index)];
+		snake_node * const old_head = &snake->nodes[RING_MASK(snake->head)];
 		switch (snake->direction)
 		{
 			case UP:
@@ -199,13 +200,13 @@ int main(void)
 				new_head->x = old_head->x + STEP;
 				new_head->y = old_head->y;
 				break;
-			default:        // unknown direction
-				panic();
+			default:
+				panic("invalid direction");
 		}
 		snake->head = new_head_index;
 
-		// resolve collisions
-		cell * const new_head_cell = &matrix->cells[new_head->x * MATRIX_COLS + new_head->y];
+		// resolve movement, check for collisions and update the game matrix 
+		cell * const new_head_cell = &matrix->cells[new_head->x * MATRIX_Y + new_head->y];
 		switch (*new_head_cell)
 		{
 			case EMPTY:     // snake moves into empty space
@@ -216,24 +217,63 @@ int main(void)
 				*new_head_cell = SNAKE;
 				place_food(matrix);
 				break;
+			case WALL:      // snake collides with wall 
 			case SNAKE:     // snake collides with itself
 				chop_tail(snake, matrix);
 				*new_head_cell = COLLISION;
+				game_state->collision = true;
 				break;
-			default:        // unknown cell type
-				panic();
+			default:
+				panic("invalid cell type");
 		}
 
-		running = draw_matrix(matrix);
+		// draw the game matrix to the window buffer
+		// TODO: move to ui module
+		for (size_t x = 0; x < MATRIX_X; ++x)
+		{
+			for (size_t y = 0; y < MATRIX_Y; ++y)
+			{
+				switch (matrix->cells[x * MATRIX_Y + y])
+				{
+					case WALL:
+						wattron(window, COLOR_PAIR(WALL_PAIR));
+						mvwprintw(window, y, x * 2, "##");
+						wattroff(window, COLOR_PAIR(WALL_PAIR));
+						break;
+					case SNAKE:
+						wattron(window, COLOR_PAIR(SNAKE_PAIR));
+						mvwprintw(window, y, x * 2, "OO");
+						wattroff(window, COLOR_PAIR(SNAKE_PAIR));
+						break;
+					case FOOD:
+						wattron(window, COLOR_PAIR(FOOD_PAIR));
+						mvwprintw(window, y, x * 2, "++");
+						wattroff(window, COLOR_PAIR(FOOD_PAIR));
+						break; 
+					case EMPTY:
+						mvwprintw(window, y, x * 2, "  ");
+						break;
+					case COLLISION:
+						wattron(window, COLOR_PAIR(COLLISION_PAIR));
+						mvwprintw(window, y, x * 2, "XX");
+						wattroff(window, COLOR_PAIR(COLLISION_PAIR));
+						break;
+					default:
+						panic("unknown matrix cell type");
+				}
+			}
+		}
+
+		// flush the window buffer to the screen
+		wrefresh(window);
 
 		static struct timespec const ts = { 0, GAME_LOOP_DELAY * 1000000 };
 		nanosleep(&ts, NULL);
 	}
 
-	free(snake);
-	free(matrix);
+	free(game_state);
+	cleanup(window);
 
-	cleanup_window();
 	return EXIT_SUCCESS;
 }
 
